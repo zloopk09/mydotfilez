@@ -85,6 +85,7 @@ SPACESHIP_PROMPT_ORDER=(
 # ===== 开发环境配置 =====
 # Android 开发
 export ANDROID_HOME="$HOME/dev/android/sdk"
+export ANDROID_SDK_ROOT="$HOME/dev/android/sdk"
 
 # Flutter 配置
 export PUB_HOSTED_URL="https://pub.flutter-io.cn"
