@@ -12,7 +12,7 @@ brew "trash"
 # cask "cheatsheet"
 cask "jordanbaird-ice"
 cask "rectangle"
-cask "alfred"
+cask "raycast"
 cask "iterm2"
 cask "visual-studio-code"
 
