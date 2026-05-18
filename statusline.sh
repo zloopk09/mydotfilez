@@ -13,8 +13,8 @@ readonly C_CTX_WARN='\033[38;2;241;250;140m'   # yellow (20-50%)
 readonly C_CTX_LOW='\033[38;2;255;85;85m'      # red (<20%)
 readonly C_BAR_EMPTY='\033[38;2;68;71;90m'     # comment gray
 readonly C_DIR='\033[38;2;139;233;253m'         # cyan
-readonly C_GIT='\033[38;2;255;184;108m'         # orange
-readonly C_GIT_DIRTY='\033[38;2;241;250;140m'  # yellow
+readonly C_GIT='\033[38;2;80;250;123m'          # green (clean)
+readonly C_GIT_DIRTY='\033[38;2;255;184;108m'  # orange (dirty)
 readonly C_WORKTREE='\033[38;2;255;121;198m'   # pink
 readonly C_COST='\033[38;2;255;215;0m'         # gold
 readonly C_META='\033[38;2;98;114;164m'         # dim gray (meta info)
@@ -74,11 +74,13 @@ for f in "$HOME/.claude/settings.local.json" "$HOME/.claude/settings.json"; do
     fi
 done
 
-# Context - build progress bar only when data is present (no default = no flash)
-remaining=$(echo "$input" | jq -r '.context_window.remaining_percentage // empty')
+# Context - use used_percentage directly (more stable than remaining)
+used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
 bar=""
-if [ -n "$remaining" ]; then
-    used=$((100 - remaining))
+if [ -n "$used" ]; then
+    # Ensure integer (jq may return float like 7.5)
+    used=$(printf "%.0f" "$used")
+    remaining=$((100 - used))
     filled=$((used / 5))
     empty=$((20 - filled))
 
