@@ -1,8 +1,8 @@
 #!/bin/bash
 # Claude Code Status Line - Three-line display with Dracula theme
-# Line 1: Model | Effort | Context Bar
+# Line 1: Model | Effort | Context Bar | Cost
 # Line 2: Dir | Git Branch | Worktree
-# Line 3: Cost | Token In | Token Out | Cache Hit
+# Line 3: Token In | Token Out | Cache Hit
 # Style: Inspired by webup/skills-cc
 
 # ── Dracula Theme Colors ────────────────────────────────────────────
@@ -41,17 +41,18 @@ readonly I_HIT='↻'
 # Bar characters
 readonly BAR_FILLED='█'
 readonly BAR_EMPTY='░'
+readonly BAR_WIDTH=20
 
 # ── Token formatter ──────────────────────────────────────────────────
-# Converts 12345 -> 12.3k, 1234567 -> 1.2m
+# Converts 12345 -> 12.3K, 1234567 -> 1.2M (uppercase like ccstatusline)
 format_tokens() {
     local n="$1"
     if [ -z "$n" ] || [ "$n" -eq 0 ]; then
         echo "0"
     elif [ "$n" -ge 1000000 ]; then
-        awk -v v="$n" 'BEGIN { printf "%.1fm", v/1000000 }'
+        awk -v v="$n" 'BEGIN { printf "%.1fM", v/1000000 }'
     elif [ "$n" -ge 1000 ]; then
-        awk -v v="$n" 'BEGIN { printf "%.1fk", v/1000 }'
+        awk -v v="$n" 'BEGIN { printf "%.1fK", v/1000 }'
     else
         echo "$n"
     fi
@@ -59,41 +60,102 @@ format_tokens() {
 
 # ── Read JSON from stdin ─────────────────────────────────────────────
 input=$(cat)
-echo "$input" > /tmp/statusline-dump.json 2>/dev/null
+
+# Single jq call to extract all needed fields (performance optimization)
+# Use TSV format and cut for reliable field extraction (bash read skips empty fields)
+tsv=$(echo "$input" | jq -r '[
+    .model.display_name // .model.id // "Claude",
+    .context_window.used_percentage // "",
+    .context_window.total_input_tokens // 0,
+    .cost.total_cost_usd // 0,
+    .workspace.current_dir // .cwd // "",
+    .worktree.name // "",
+    .context_window.total_output_tokens // 0,
+    .context_window.current_usage.cache_read_input_tokens // 0,
+    .context_window.current_usage.input_tokens // 0,
+    .context_window.context_window_size // 0,
+    .transcript_path // "",
+    .effort.level // ""
+] | @tsv')
+
+model=$(echo "$tsv" | cut -f1)
+used_raw=$(echo "$tsv" | cut -f2)
+total_in=$(echo "$tsv" | cut -f3)
+cost_usd=$(echo "$tsv" | cut -f4)
+cwd=$(echo "$tsv" | cut -f5)
+worktree_name=$(echo "$tsv" | cut -f6)
+out_tokens=$(echo "$tsv" | cut -f7)
+cache_read=$(echo "$tsv" | cut -f8)
+current_in=$(echo "$tsv" | cut -f9)
+ctx_size=$(echo "$tsv" | cut -f10)
+transcript_path=$(echo "$tsv" | cut -f11)
+effort_status=$(echo "$tsv" | cut -f12)
 
 # ── Line 1: Model, Effort, Context Bar ────────────────────────────────
 
-# Model
-model=$(echo "$input" | jq -r '.model.display_name // .model.id // "Claude"')
+# Model (already extracted above)
 
-# Effort level (read from settings)
+# Effort level - multi-source fallback (like ccstatusline):
+# 1. statusJSON.effort.level (most reliable)
+# 2. Transcript (last effort command)
+# 3. Settings file (fallback)
 effort=""
-for f in "$HOME/.claude/settings.local.json" "$HOME/.claude/settings.json"; do
-    if [ -z "$effort" ] && [ -f "$f" ]; then
-        effort=$(jq -r '.effortLevel // empty' "$f" 2>/dev/null)
-    fi
-done
+if [ -n "$effort_status" ]; then
+    effort="$effort_status"
+elif [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    # Search transcript for effort setting (reverse order, last match wins)
+    effort=$(tail -r "$transcript_path" 2>/dev/null | grep -m1 -oE 'Set effort level to [a-zA-Z0-9-]+' | sed 's/Set effort level to //' 2>/dev/null)
+fi
+# Fallback to settings if still empty
+if [ -z "$effort" ]; then
+    for f in "$HOME/.claude/settings.local.json" "$HOME/.claude/settings.json"; do
+        if [ -z "$effort" ] && [ -f "$f" ]; then
+            effort=$(jq -r '.effortLevel // empty' "$f" 2>/dev/null)
+        fi
+    done
+fi
 
-# Context - use used_percentage directly (more stable than remaining)
-used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
+# Context - use used_percentage directly from API (real-time)
 bar=""
-if [ -n "$used" ]; then
+
+if [ -n "$used_raw" ] && [ "$used_raw" != "0" -o "$total_in" != "0" ]; then
+    used_int=$(printf "%.0f" "$used_raw")
+    used="$used_int"
+elif [ "$total_in" -eq 0 ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    # stdin shows zero but transcript exists - post-/compact glitch fallback
+    compact_info=$(tail -r "$transcript_path" 2>/dev/null | grep -m1 '"type":"system".*"subtype":"compact_boundary"' | jq -c '{post: .compactMetadata.postTokens, size: .compactMetadata.contextWindowSize}' 2>/dev/null)
+    if [ -n "$compact_info" ]; then
+        post_tokens=$(echo "$compact_info" | jq -r '.post // empty')
+        compact_ctx_size=$(echo "$compact_info" | jq -r '.size // empty')
+        if [ -n "$post_tokens" ] && [ "$post_tokens" -gt 0 ]; then
+            if [ -n "$compact_ctx_size" ] && [ "$compact_ctx_size" -gt 0 ]; then
+                used=$((post_tokens * 100 / compact_ctx_size))
+            elif [ "$ctx_size" -gt 0 ]; then
+                used=$((post_tokens * 100 / ctx_size))
+            else
+                used=$((post_tokens * 100 / 200000))
+            fi
+        fi
+    fi
+fi
+
+if [ -n "$used" ] && [ "$used" != "0" ]; then
     # Ensure integer (jq may return float like 7.5)
     used=$(printf "%.0f" "$used")
     remaining=$((100 - used))
-    filled=$((used / 5))
-    empty=$((20 - filled))
+    filled=$((used * BAR_WIDTH / 100))
+    empty=$((BAR_WIDTH - filled))
 
     # Color based on remaining capacity
-    if [ "$remaining" -lt 20 ]; then
+    if [ "$remaining" -lt 15 ]; then
         ctx_color="$C_CTX_LOW"
-    elif [ "$remaining" -lt 50 ]; then
+    elif [ "$remaining" -lt 40 ]; then
         ctx_color="$C_CTX_WARN"
     else
         ctx_color="$C_CTX_OK"
     fi
 
-    # Build bar: ████░░░░░░░░░░░░░░ 25%
+    # Build bar: ████████████████░░░░░░░░░░░░░░ 62%
     for ((i=0; i<filled; i++)); do bar+="${ctx_color}${BAR_FILLED}${RST}"; done
     for ((i=0; i<empty; i++)); do bar+="${C_BAR_EMPTY}${BAR_EMPTY}${RST}"; done
     bar+=" ${ctx_color}${used}%${RST}"
@@ -116,37 +178,38 @@ fi
 
 [ -n "$bar" ] && line1="${line1}${C_SEP}${SEP}${RST}${bar}"
 
-# Cost on line 1
-cost_usd=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
+# Cost on line 1 (already extracted above)
 cost_formatted=$(awk -v v="$cost_usd" 'BEGIN { printf "%.2f", v+0 }')
 line1="${line1}${C_SEP}${SEP}${RST}${C_COST}${I_COST}${cost_formatted}${RST}"
 
 # ── Line 2: Dir, Git, Worktree ───────────────────────────────────────
 
-cwd=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // ""')
+# cwd already extracted above
 if [ -n "$cwd" ]; then
     cwd="${cwd/#$HOME/~}"
 fi
 
-# Git branch with dirty detection
+# Git branch with dirty/conflict detection
 git_branch=""
-git_dirty=0
+git_status="clean"  # clean | dirty | conflict
 if [ -n "$cwd" ]; then
     resolved_cwd="${cwd/#\~/$HOME}"
     if git -C "$resolved_cwd" --no-optional-locks rev-parse --git-dir >/dev/null 2>&1; then
         git_branch=$(git -C "$resolved_cwd" --no-optional-locks branch --show-current 2>/dev/null)
         [ -z "$git_branch" ] && git_branch=$(git -C "$resolved_cwd" --no-optional-locks rev-parse --short HEAD 2>/dev/null)
         if [ -n "$git_branch" ]; then
-            if ! git -C "$resolved_cwd" --no-optional-locks diff --quiet 2>/dev/null || \
+            # Check for conflicts first (highest priority)
+            if git -C "$resolved_cwd" --no-optional-locks diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
+                git_status="conflict"
+            elif ! git -C "$resolved_cwd" --no-optional-locks diff --quiet 2>/dev/null || \
                ! git -C "$resolved_cwd" --no-optional-locks diff --cached --quiet 2>/dev/null; then
-                git_dirty=1
+                git_status="dirty"
             fi
         fi
     fi
 fi
 
-# Worktree detection
-worktree_name=$(echo "$input" | jq -r '.worktree.name // empty')
+# Worktree detection (worktree_name already extracted above)
 is_worktree=0
 if [ -n "$worktree_name" ]; then
     is_worktree=1
@@ -165,23 +228,19 @@ fi
 # Assemble Line 2
 line2="${C_DIR}${I_DIR} ${cwd}${RST}"
 if [ -n "$git_branch" ]; then
-    if [ "$git_dirty" -eq 1 ]; then
-        line2="${line2}${C_SEP}${SEP}${RST}${C_GIT_DIRTY}${I_GIT} ${git_branch}${RST}"
-    else
-        line2="${line2}${C_SEP}${SEP}${RST}${C_GIT}${I_GIT} ${git_branch}${RST}"
-    fi
+    case "$git_status" in
+        conflict) line2="${line2}${C_SEP}${SEP}${RST}${C_EFFORT_XHIGH}${I_GIT} ${git_branch}${RST}" ;;
+        dirty)    line2="${line2}${C_SEP}${SEP}${RST}${C_GIT_DIRTY}${I_GIT} ${git_branch}${RST}" ;;
+        *)        line2="${line2}${C_SEP}${SEP}${RST}${C_GIT}${I_GIT} ${git_branch}${RST}" ;;
+    esac
 fi
 if [ "$is_worktree" -eq 1 ] && [ -n "$worktree_name" ]; then
     line2="${line2}${C_SEP}${SEP}${RST}\033[1m${C_WORKTREE}${I_WORKTREE} worktree:${worktree_name}${RST}"
 fi
 
-# ── Line 3: Cost | Token In | Token Out | Cache Hit ──────────────────
+# ── Line 3: Token In | Token Out | Cache Hit ─────────────────────────
 
-# Tokens
-in_tokens=$(echo "$input" | jq -r '.context_window.total_input_tokens // 0')
-out_tokens=$(echo "$input" | jq -r '.context_window.total_output_tokens // 0')
-cache_read=$(echo "$input" | jq -r '.context_window.current_usage.cache_read_input_tokens // 0')
-current_in=$(echo "$input" | jq -r '.context_window.current_usage.input_tokens // 0')
+# Tokens already extracted above
 
 # Cache hit % = cache_read / (cache_read + current_in) * 100
 hit_pct="0"
@@ -190,7 +249,7 @@ if [ "$total_for_hit" -gt 0 ]; then
     hit_pct=$(awk -v read="$cache_read" -v total="$total_for_hit" 'BEGIN { printf "%.1f", (read/total)*100 }')
 fi
 
-in_fmt=$(format_tokens "$in_tokens")
+in_fmt=$(format_tokens "$total_in")
 out_fmt=$(format_tokens "$out_tokens")
 
 line3="${C_META}${I_IN} ${in_fmt}${RST}"
