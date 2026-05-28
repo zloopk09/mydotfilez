@@ -216,6 +216,13 @@ if [ -n "$worktree_name" ]; then
 elif [ -n "$resolved_cwd" ] && git -C "$resolved_cwd" --no-optional-locks rev-parse --git-dir >/dev/null 2>&1; then
     _gd=$(git -C "$resolved_cwd" --no-optional-locks rev-parse --git-dir 2>/dev/null)
     _gcd=$(git -C "$resolved_cwd" --no-optional-locks rev-parse --git-common-dir 2>/dev/null)
+    # Resolve to absolute paths for comparison (git-common-dir may return relative path)
+    if [ -n "$_gd" ]; then
+        _gd=$(cd "$resolved_cwd" 2>/dev/null && cd "$_gd" 2>/dev/null && pwd)
+    fi
+    if [ -n "$_gcd" ]; then
+        _gcd=$(cd "$resolved_cwd" 2>/dev/null && cd "$_gcd" 2>/dev/null && pwd)
+    fi
     if [ -n "$_gd" ] && [ -n "$_gcd" ] && [ "$_gd" != "$_gcd" ]; then
         is_worktree=1
         if [ -z "$worktree_name" ]; then
